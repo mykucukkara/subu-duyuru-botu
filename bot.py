@@ -39,7 +39,9 @@ SOURCES = [
 ]
 
 STATE_FILE = Path(__file__).parent / "seen.json"
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 45          # saniye (site bazen yavaş yanıt veriyor)
+FETCH_RETRIES = 3             # zaman aşımı/geçici hatada kaç kez denensin
+RETRY_WAIT = 5               # denemeler arası bekleme (saniye)
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SubuDuyuruBot/1.0)"}
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -100,11 +102,27 @@ def item_key(url):
 
 # --- Sayfa tarama ----------------------------------------------------------
 
+def fetch_html(url):
+    """Sayfayı indir; zaman aşımı/geçici hatalarda birkaç kez yeniden dene."""
+    last_err = None
+    for attempt in range(1, FETCH_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or "utf-8"
+            return resp.text
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < FETCH_RETRIES:
+                print(f"    (deneme {attempt}/{FETCH_RETRIES} başarısız: {e}; "
+                      f"{RETRY_WAIT}sn sonra tekrar)")
+                time.sleep(RETRY_WAIT)
+    raise last_err
+
+
 def fetch_items(source):
-    resp = requests.get(source["url"], headers=HEADERS, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding or "utf-8"
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = fetch_html(source["url"])
+    soup = BeautifulSoup(html, "html.parser")
 
     items = []
     for li in soup.select("ul.list-duyuru-etkinlik > li"):
