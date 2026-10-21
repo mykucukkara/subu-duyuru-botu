@@ -151,6 +151,14 @@ def fetch_items(source):
 
 # --- Telegram --------------------------------------------------------------
 
+# Her kaynak türü için ayrı simge
+SOURCE_ICONS = {
+    "Duyuru": "📢",
+    "Etkinlik": "📅",
+    "Haber": "📰",
+}
+
+
 def html_escape(text):
     return (text.replace("&", "&amp;")
                 .replace("<", "&lt;")
@@ -160,8 +168,9 @@ def html_escape(text):
 def send_telegram(item):
     date_str = item["date"].strftime("%d.%m.%Y") if item["date"] else ""
     title = html_escape(item["title"])
+    icon = SOURCE_ICONS.get(item["source"], "📢")
     msg = (
-        f"📢 <b>{html_escape(item['source'])}</b>"
+        f"{icon} <b>{html_escape(item['source'])}</b>"
         + (f" · {date_str}" if date_str else "")
         + f"\n\n<a href=\"{item['url']}\">{title}</a>"
     )
