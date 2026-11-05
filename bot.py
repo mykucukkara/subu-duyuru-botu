@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SUBÜ Bilgisayar Mühendisliği duyuru/etkinlik/haber botu.
+SUBÜ Bilgisayar Mühendisliği duyuru/haber/etkinlik botu.
 
-Üç sayfayı tarar, yeni (bugünden itibaren yayınlanmış) ve daha önce
-gönderilmemiş öğeleri Telegram kanalına link olarak yollar.
+Yeni (Nuxt/headless CMS) siteden JSON API üzerinden duyuru, haber ve
+etkinlikleri okur; başlangıç gününden sonra yayınlanmış ve daha önce
+gönderilmemiş olanları Telegram kanalına link olarak yollar.
 
 Durum "seen.json" dosyasında tutulur ve her çalıştırmada repoya commit edilir.
+
+API (token gerektirmiyor):
+  GET https://cmsservice.subu.edu.tr/posts/{announcement|news|event}/live?limit=N&unit=32208
+Detay linki:
+  https://bm.subu.edu.tr/node/{post_id}?unitID=32208
 """
 
 import json
 import os
-import re
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
 
 # Windows konsolu gibi UTF-8 olmayan ortamlarda print çökmesin.
 for _stream in (sys.stdout, sys.stderr):
@@ -30,19 +33,27 @@ for _stream in (sys.stdout, sys.stderr):
 
 # --- Ayarlar ---------------------------------------------------------------
 
-BASE_URL = "https://bm.subu.edu.tr"
+SITE_URL = "https://bm.subu.edu.tr"
+API_BASE = "https://cmsservice.subu.edu.tr"
+UNIT_ID = "32208"          # Bilgisayar Mühendisliği bölümünün CMS birim kimliği
+FETCH_LIMIT = 20           # her türden en fazla kaç öğe çekilsin
+SOURCE_API = "cms-v2"      # seen.json şema sürümü (site değişince migrasyon için)
 
+# API tür -> kanal etiketi ve simge
 SOURCES = [
-    {"name": "Duyuru",   "url": "https://bm.subu.edu.tr/tr/duyurular"},
-    {"name": "Etkinlik", "url": "https://bm.subu.edu.tr/tr/etkinlikler"},
-    {"name": "Haber",    "url": "https://bm.subu.edu.tr/tr/haberler"},
+    {"type": "announcement", "name": "Duyuru",   "icon": "📢"},
+    {"type": "news",         "name": "Haber",     "icon": "📰"},
+    {"type": "event",        "name": "Etkinlik",  "icon": "📅"},
 ]
 
 STATE_FILE = Path(__file__).parent / "seen.json"
-REQUEST_TIMEOUT = 45          # saniye (site bazen yavaş yanıt veriyor)
-FETCH_RETRIES = 3             # zaman aşımı/geçici hatada kaç kez denensin
-RETRY_WAIT = 5               # denemeler arası bekleme (saniye)
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SubuDuyuruBot/1.0)"}
+REQUEST_TIMEOUT = 45
+FETCH_RETRIES = 3
+RETRY_WAIT = 5
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; SubuDuyuruBot/2.0)",
+    "Accept": "application/json",
+}
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -56,15 +67,15 @@ def load_state():
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             data.setdefault("start_date", None)
             data.setdefault("seen", [])
+            data.setdefault("source_api", None)
             return data
         except (json.JSONDecodeError, OSError):
             pass
-    return {"start_date": None, "seen": []}
+    return {"start_date": None, "seen": [], "source_api": None}
 
 
 def save_state(state):
-    # "seen" listesini sınırlı tut (çok büyümesin)
-    state["seen"] = state["seen"][-500:]
+    state["seen"] = state["seen"][-1000:]
     STATE_FILE.write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -74,44 +85,27 @@ def save_state(state):
 # --- Tarih ayrıştırma ------------------------------------------------------
 
 def parse_date(text):
-    """'15 / 10 / 2026' -> date(2026, 10, 15). Ayrıştırılamazsa None."""
-    m = re.search(r"(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{4})", text)
-    if not m:
+    """ISO tarih ('2026-11-05T08:08:12.000Z') -> date. Ayrıştırılamazsa None."""
+    if not text:
         return None
-    day, month, year = (int(m.group(i)) for i in (1, 2, 3))
     try:
-        return date(year, month, day)
-    except ValueError:
+        s = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(s).date()
+    except (ValueError, AttributeError):
         return None
 
 
-# --- İçerik anahtarı (tekilleştirme için) ----------------------------------
+# --- API'den çekme ---------------------------------------------------------
 
-def item_key(url):
-    """
-    /tr/node/1202 ve /index.php/tr/node/1202 aynı içerik -> aynı anahtar.
-    """
-    m = re.search(r"/node/(\d+)", url)
-    if m:
-        return f"node:{m.group(1)}"
-    m = re.search(r"/etkinlik/([^/?#]+)", url)
-    if m:
-        return f"etkinlik:{m.group(1)}"
-    return url
-
-
-# --- Sayfa tarama ----------------------------------------------------------
-
-def fetch_html(url):
-    """Sayfayı indir; zaman aşımı/geçici hatalarda birkaç kez yeniden dene."""
+def fetch_json(url):
+    """JSON çek; zaman aşımı/geçici hatalarda birkaç kez yeniden dene."""
     last_err = None
     for attempt in range(1, FETCH_RETRIES + 1):
         try:
             resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
-            resp.encoding = resp.apparent_encoding or "utf-8"
-            return resp.text
-        except requests.RequestException as e:
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
             last_err = e
             if attempt < FETCH_RETRIES:
                 print(f"    (deneme {attempt}/{FETCH_RETRIES} başarısız: {e}; "
@@ -120,44 +114,46 @@ def fetch_html(url):
     raise last_err
 
 
+def extract_title(raw):
+    t = raw.get("title")
+    if isinstance(t, dict):
+        return (t.get("tr") or next(iter(t.values()), "") or "").strip()
+    return (t or "").strip()
+
+
+def build_link(raw):
+    """Öğenin dış linki varsa onu, yoksa site detay sayfasını döndür."""
+    link = (raw.get("link") or "").strip()
+    if link.startswith("http"):
+        return link
+    post_id = raw.get("post_id") or raw.get("id")
+    return f"{SITE_URL}/node/{post_id}?unitID={UNIT_ID}"
+
+
 def fetch_items(source):
-    html = fetch_html(source["url"])
-    soup = BeautifulSoup(html, "html.parser")
+    url = f"{API_BASE}/posts/{source['type']}/live?limit={FETCH_LIMIT}&unit={UNIT_ID}"
+    data = fetch_json(url)
+    if not isinstance(data, list):
+        return []
 
     items = []
-    for li in soup.select("ul.list-duyuru-etkinlik > li"):
-        a = li.find("a", href=True)
-        if not a:
+    for raw in data:
+        post_id = raw.get("post_id") or raw.get("id")
+        title = extract_title(raw)
+        if not post_id or not title:
             continue
-        title = a.get_text(strip=True)
-        href = a["href"]
-        url = urljoin(BASE_URL, href)
-
-        date_span = li.find("span", class_="content-list-view-date")
-        published = parse_date(date_span.get_text()) if date_span else None
-
-        if not title or not url:
-            continue
-
         items.append({
             "source": source["name"],
+            "icon": source["icon"],
             "title": title,
-            "url": url,
-            "key": item_key(url),
-            "date": published,
+            "url": build_link(raw),
+            "key": f"{source['type']}:{post_id}",
+            "date": parse_date(raw.get("date")),
         })
     return items
 
 
 # --- Telegram --------------------------------------------------------------
-
-# Her kaynak türü için ayrı simge
-SOURCE_ICONS = {
-    "Duyuru": "📢",
-    "Etkinlik": "📅",
-    "Haber": "📰",
-}
-
 
 def html_escape(text):
     return (text.replace("&", "&amp;")
@@ -168,9 +164,8 @@ def html_escape(text):
 def send_telegram(item):
     date_str = item["date"].strftime("%d.%m.%Y") if item["date"] else ""
     title = html_escape(item["title"])
-    icon = SOURCE_ICONS.get(item["source"], "📢")
     msg = (
-        f"{icon} <b>{html_escape(item['source'])}</b>"
+        f"{item['icon']} <b>{html_escape(item['source'])}</b>"
         + (f" · {date_str}" if date_str else "")
         + f"\n\n<a href=\"{item['url']}\">{title}</a>"
     )
@@ -198,54 +193,57 @@ def main():
     state = load_state()
     today = date.today()
 
-    # İlk çalıştırma: başlangıç tarihini bugüne sabitle.
-    # Bu tarihten ÖNCE yayınlanmış geçmiş duyurular hiç gönderilmez.
-    first_run = state["start_date"] is None
-    if first_run:
-        state["start_date"] = today.isoformat()
-        print(f"İlk çalıştırma. Başlangıç tarihi: {today.isoformat()} "
-              f"(bu tarihten eski duyurular gönderilmeyecek).")
-    start_date = date.fromisoformat(state["start_date"])
-
-    seen = set(state["seen"])
+    # Tüm kaynakları çek
     all_items = []
     for source in SOURCES:
         try:
             found = fetch_items(source)
             print(f"{source['name']}: {len(found)} öğe bulundu.")
             all_items.extend(found)
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             print(f"  ! {source['name']} alınamadı: {e}", file=sys.stderr)
 
-    # Gönderilecekler: başlangıç tarihinden sonra yayınlanmış + daha önce görülmemiş.
-    # Tarihe göre eskiden yeniye sırala ki kanala kronolojik düşsün.
+    # --- Migrasyon / ilk çalıştırma ---
+    # Site/API değiştiyse (ya da hiç çalışmadıysa) geçmişi TOPLUCA GÖNDERME:
+    # mevcut tüm öğeleri 'görüldü' say, başlangıç tarihini bugüne sabitle.
+    if state["source_api"] != SOURCE_API or state["start_date"] is None:
+        state["seen"] = sorted({it["key"] for it in all_items})
+        state["start_date"] = today.isoformat()
+        state["source_api"] = SOURCE_API
+        save_state(state)
+        print(f"Kurulum/migrasyon tamamlandı (API={SOURCE_API}). "
+              f"Başlangıç tarihi: {today.isoformat()}. "
+              f"{len(state['seen'])} mevcut öğe 'görüldü' işaretlendi, hiçbiri gönderilmedi.")
+        return
+
+    start_date = date.fromisoformat(state["start_date"])
+    seen = set(state["seen"])
+
     to_send = []
     for item in all_items:
         if item["key"] in seen:
             continue
         if item["date"] is None or item["date"] < start_date:
-            # Tarihsiz ya da başlangıçtan eski: gönderme, ama görüldü say.
-            seen.add(item["key"])
+            seen.add(item["key"])  # eski/tarihsiz: gönderme ama görüldü say
             continue
         to_send.append(item)
 
-    to_send.sort(key=lambda x: x["date"])
+    to_send.sort(key=lambda x: x["date"])  # eskiden yeniye (kronolojik)
 
     if not to_send:
         print("Yeni duyuru yok.")
     else:
-        print(f"{len(to_send)} yeni duyuru gönderiliyor...")
+        print(f"{len(to_send)} yeni öğe gönderiliyor...")
         for item in to_send:
             try:
                 send_telegram(item)
                 seen.add(item["key"])
                 print(f"  ✓ [{item['source']}] {item['title']}")
-                time.sleep(1)  # Telegram hız sınırına takılmamak için
+                time.sleep(1)
             except requests.RequestException:
-                # Gönderilemeyeni 'görüldü' sayma; sonraki turda tekrar denenir.
                 print(f"  ✗ Gönderilemedi: {item['title']}", file=sys.stderr)
 
-    state["seen"] = sorted(seen) if False else list(seen)
+    state["seen"] = list(seen)
     save_state(state)
     print("Bitti.")
 
