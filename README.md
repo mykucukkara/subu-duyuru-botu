@@ -100,4 +100,9 @@ python bot.py
 ## Notlar
 
 - GitHub Actions cron'u yoğunlukta birkaç dakika gecikmeli tetikleyebilir; saat başı mantığı için sorun olmaz.
-- Site HTML yapısı değişirse `bot.py` içindeki `ul.list-duyuru-etkinlik` seçicisi güncellenmelidir.
+- Bot, siteyi HTML kazımak yerine CMS JSON API'sinden okur:
+  `https://cmsservice.subu.edu.tr/posts/{announcement|news|event}/live?limit=N&unit=32208`
+  (`unit=32208` = Bilgisayar Mühendisliği). Detay linki: `.../node/{post_id}?unitID=32208`.
+- Site/altyapı yeniden değişirse `bot.py` içindeki `API_BASE`, `UNIT_ID` ve `SOURCES`
+  güncellenmelidir. `seen.json` içindeki `source_api` değeri değiştirilirse bot bir sonraki
+  çalışmada migrasyon yapar (mevcut her şeyi "görüldü" sayar, geçmişi toplu göndermez).
