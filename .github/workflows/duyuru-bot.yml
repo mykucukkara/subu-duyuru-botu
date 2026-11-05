@@ -1,13 +1,10 @@
 name: SUBÜ Duyuru Botu
 
 on:
-  schedule:
-    # GitHub Actions cron UTC saatine göre çalışır (Türkiye UTC+3, yaz saati yok).
-    # TR 08:00–16:30 arası yarım saatte bir => UTC 05:00–13:30, dakika 0 ve 30.
-    - cron: "0,30 5-13 * * *"
-    # TR 17:00 (son kontrol) => UTC 14:00.
-    - cron: "0 14 * * *"
-  workflow_dispatch: {}   # Elle test için manuel tetikleme
+  # Zamanlama cron-job.org tarafından dışarıdan yapılıyor (GitHub cron'u güvenilmez
+  # olduğu ve çift çalışma/dakika israfı yarattığı için kaldırıldı).
+  # cron-job.org, TR 08:00-17:00 arası her yarım saatte bu workflow'u tetikler.
+  workflow_dispatch: {}
 
 # seen.json dosyasını repoya geri commit edebilmek için yazma izni
 permissions:
