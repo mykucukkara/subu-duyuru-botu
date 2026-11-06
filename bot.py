@@ -37,13 +37,15 @@ SITE_URL = "https://bm.subu.edu.tr"
 API_BASE = "https://cmsservice.subu.edu.tr"
 UNIT_ID = "32208"          # Bilgisayar Mühendisliği bölümünün CMS birim kimliği
 FETCH_LIMIT = 20           # her türden en fazla kaç öğe çekilsin
-SOURCE_API = "cms-v2"      # seen.json şema sürümü (site değişince migrasyon için)
+SOURCE_API = "cms-v3"      # seen.json şema sürümü (site değişince migrasyon için)
 
-# API tür -> kanal etiketi ve simge
+# API tür -> kanal etiketi, simge ve detay sayfası yol öneki.
+# (Yol önekleri sitenin kendi yönlendirmesinden alındı:
+#  announcement->/duyuru/, news->/node/, event->/etkinlik/)
 SOURCES = [
-    {"type": "announcement", "name": "Duyuru",   "icon": "📢"},
-    {"type": "news",         "name": "Haber",     "icon": "📰"},
-    {"type": "event",        "name": "Etkinlik",  "icon": "📅"},
+    {"type": "announcement", "name": "Duyuru",   "icon": "📢", "path": "duyuru"},
+    {"type": "news",         "name": "Haber",     "icon": "📰", "path": "node"},
+    {"type": "event",        "name": "Etkinlik",  "icon": "📅", "path": "etkinlik"},
 ]
 
 STATE_FILE = Path(__file__).parent / "seen.json"
@@ -121,13 +123,17 @@ def extract_title(raw):
     return (t or "").strip()
 
 
-def build_link(raw):
-    """Öğenin dış linki varsa onu, yoksa site detay sayfasını döndür."""
+def build_link(raw, source):
+    """Öğenin dış linki varsa onu, yoksa site detay sayfasını döndür.
+
+    Detay linki, öğenin API 'id' değeri ve türe göre yol öneki ile kurulur
+    (ör. duyuru -> /duyuru/{id}). post_id KULLANILMAZ; detay sayfası id ile
+    çözülüyor, post_id farklı/yanlış içeriğe gidiyor. Sorgu (?unitID) eklenmez.
+    """
     link = (raw.get("link") or "").strip()
     if link.startswith("http"):
         return link
-    post_id = raw.get("post_id") or raw.get("id")
-    return f"{SITE_URL}/node/{post_id}?unitID={UNIT_ID}"
+    return f"{SITE_URL}/{source['path']}/{raw.get('id')}"
 
 
 def fetch_items(source):
@@ -138,16 +144,16 @@ def fetch_items(source):
 
     items = []
     for raw in data:
-        post_id = raw.get("post_id") or raw.get("id")
+        item_id = raw.get("id")
         title = extract_title(raw)
-        if not post_id or not title:
+        if item_id is None or not title:
             continue
         items.append({
             "source": source["name"],
             "icon": source["icon"],
             "title": title,
-            "url": build_link(raw),
-            "key": f"{source['type']}:{post_id}",
+            "url": build_link(raw, source),
+            "key": f"{source['type']}:{item_id}",
             "date": parse_date(raw.get("date")),
         })
     return items
