@@ -38,12 +38,28 @@ jobs:
 
       - name: Durumu kaydet (seen.json)
         run: |
-          if [[ -n "$(git status --porcelain seen.json)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -z "$(git status --porcelain seen.json)" ]]; then
+            echo "Değişiklik yok, commit atlanıyor."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+          git commit -m "chore: duyuru durumunu güncelle [skip ci]"
+          # Eşzamanlı çalışmalar remote'u ilerletmiş olabilir; push reddedilirse
+          # remote seen.json ile birleştirip tekrar dene (en çok 5 kez).
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "push başarılı (deneme $i)"
+              exit 0
+            fi
+            echo "push $i reddedildi; remote ile birleştiriliyor..."
+            git fetch origin main
+            git show origin/main:seen.json > /tmp/remote_seen.json 2>/dev/null || echo '{}' > /tmp/remote_seen.json
+            python merge_seen.py seen.json /tmp/remote_seen.json
+            git reset --soft origin/main
             git add seen.json
             git commit -m "chore: duyuru durumunu güncelle [skip ci]"
-            git push
-          else
-            echo "Değişiklik yok, commit atlanıyor."
-          fi
+          done
+          echo "HATA: push 5 denemede başarısız" >&2
+          exit 1
